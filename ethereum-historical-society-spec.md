@@ -1250,6 +1250,610 @@ SENTRY_DSN=...
 
 ---
 
+## Testing Strategy
+
+### Testing Stack
+
+| Tool | Purpose |
+|------|---------|
+| Vitest | Unit & integration tests |
+| React Testing Library | Component tests |
+| Playwright | E2E tests |
+| MSW | API mocking |
+
+### Test Structure
+
+```
+apps/web/
+├── src/
+│   ├── components/
+│   │   └── timeline/
+│   │       ├── Timeline.tsx
+│   │       ├── Timeline.test.tsx      # Unit tests
+│   │       └── Timeline.stories.tsx   # Storybook (optional)
+│   └── hooks/
+│       ├── useTimelineData.ts
+│       └── useTimelineData.test.ts
+├── tests/
+│   ├── e2e/
+│   │   ├── timeline.spec.ts           # E2E flows
+│   │   └── chat.spec.ts
+│   └── integration/
+│       └── api.test.ts                # API integration tests
+
+apps/api/
+├── src/
+│   ├── routes/
+│   │   ├── timeline.ts
+│   │   └── timeline.test.ts
+│   └── services/
+│       ├── retrieval.ts
+│       └── retrieval.test.ts
+```
+
+### Testing Priorities
+
+**High Priority (must have):**
+- API routes: all endpoints with success/error cases
+- Data services: retrieval, embedding, sync logic
+- Core hooks: useTimelineData, useChat, useSearch
+- Business logic: date parsing, EIP relationships, era calculations
+
+**Medium Priority:**
+- Component rendering: Timeline, ChatInterface, EIPBrowser
+- User interactions: click, scroll, submit
+- State management: Zustand stores
+
+**Lower Priority:**
+- Pure UI components (rely on Storybook visual testing)
+- E2E happy paths (smoke tests)
+
+### Test Patterns
+
+```typescript
+// Unit test example: services/eipParser.test.ts
+import { describe, it, expect } from 'vitest'
+import { parseEIPHeader, extractRelationships } from './eipParser'
+
+describe('parseEIPHeader', () => {
+  it('parses standard EIP header', () => {
+    const raw = `---
+eip: 1559
+title: Fee market change
+status: Final
+---`
+    
+    const result = parseEIPHeader(raw)
+    
+    expect(result).toEqual({
+      number: 1559,
+      title: 'Fee market change',
+      status: 'Final',
+    })
+  })
+
+  it('throws on malformed header', () => {
+    expect(() => parseEIPHeader('invalid')).toThrow('Invalid EIP header')
+  })
+})
+
+describe('extractRelationships', () => {
+  it('finds requires references', () => {
+    const content = 'This EIP requires EIP-155 and EIP-2718.'
+    
+    const refs = extractRelationships(content)
+    
+    expect(refs).toEqual([155, 2718])
+  })
+})
+```
+
+```typescript
+// Component test example: Timeline.test.tsx
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { Timeline } from './Timeline'
+import { mockTimelineNodes } from '@/tests/mocks/timeline'
+
+describe('Timeline', () => {
+  it('renders nodes grouped by era', async () => {
+    render(<Timeline nodes={mockTimelineNodes} />)
+    
+    await waitFor(() => {
+      expect(screen.getByText('FRONTIER')).toBeInTheDocument()
+      expect(screen.getByText('HOMESTEAD')).toBeInTheDocument()
+    })
+  })
+
+  it('opens detail panel on node click', async () => {
+    const user = userEvent.setup()
+    render(<Timeline nodes={mockTimelineNodes} />)
+    
+    await user.click(screen.getByText('The DAO Fork'))
+    
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByText(/state intervention/i)).toBeInTheDocument()
+  })
+
+  it('filters by era when era marker clicked', async () => {
+    const user = userEvent.setup()
+    const onEraFilter = vi.fn()
+    
+    render(<Timeline nodes={mockTimelineNodes} onEraFilter={onEraFilter} />)
+    
+    await user.click(screen.getByText('METROPOLIS'))
+    
+    expect(onEraFilter).toHaveBeenCalledWith('metropolis')
+  })
+})
+```
+
+```typescript
+// API test example: routes/timeline.test.ts
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { app } from '../index'
+import { setupTestDb, teardownTestDb, seedTimelineData } from '@/tests/helpers/db'
+
+describe('GET /api/timeline', () => {
+  beforeAll(async () => {
+    await setupTestDb()
+    await seedTimelineData()
+  })
+
+  afterAll(async () => {
+    await teardownTestDb()
+  })
+
+  it('returns paginated nodes', async () => {
+    const res = await app.request('/api/timeline?limit=10')
+    const data = await res.json()
+    
+    expect(res.status).toBe(200)
+    expect(data.nodes).toHaveLength(10)
+    expect(data.pagination.hasMore).toBe(true)
+  })
+
+  it('filters by era', async () => {
+    const res = await app.request('/api/timeline?era=merge')
+    const data = await res.json()
+    
+    expect(data.nodes.every(n => n.era === 'merge')).toBe(true)
+  })
+
+  it('filters by type', async () => {
+    const res = await app.request('/api/timeline?type=hard_fork')
+    const data = await res.json()
+    
+    expect(data.nodes.every(n => n.type === 'hard_fork')).toBe(true)
+  })
+})
+```
+
+```typescript
+// E2E test example: tests/e2e/timeline.spec.ts
+import { test, expect } from '@playwright/test'
+
+test.describe('Timeline', () => {
+  test('user can scroll through eras', async ({ page }) => {
+    await page.goto('/')
+    
+    // Start at top (Frontier)
+    await expect(page.getByText('FRONTIER')).toBeInViewport()
+    
+    // Scroll down
+    await page.mouse.wheel(0, 2000)
+    
+    // Should see later era
+    await expect(page.getByText('HOMESTEAD')).toBeInViewport()
+  })
+
+  test('user can search and navigate to result', async ({ page }) => {
+    await page.goto('/')
+    
+    // Open search
+    await page.keyboard.press('Meta+k')
+    await page.getByPlaceholder('Search...').fill('EIP-1559')
+    
+    // Click result
+    await page.getByText('EIP-1559: Fee market').click()
+    
+    // Should show detail
+    await expect(page.getByRole('dialog')).toContainText('base fee')
+  })
+
+  test('chat responds with sources', async ({ page }) => {
+    await page.goto('/')
+    
+    // Open chat
+    await page.getByText('Chat').click()
+    await page.getByPlaceholder('Ask about').fill('What is The Merge?')
+    await page.getByRole('button', { name: 'Send' }).click()
+    
+    // Wait for response
+    await expect(page.getByText('proof-of-stake')).toBeVisible({ timeout: 10000 })
+    
+    // Should show sources
+    await expect(page.getByText('Sources')).toBeVisible()
+  })
+})
+```
+
+---
+
+## Code Quality Practices
+
+### Core Principles
+
+| Principle | Application |
+|-----------|-------------|
+| **DRY** | Extract shared logic into hooks, utils, and services |
+| **Single Responsibility** | One component/function = one job |
+| **Strategic Abstraction** | Abstract when pattern repeats 3+ times, not before |
+| **Composition over Inheritance** | Use hooks and render props, not class hierarchies |
+| **Colocation** | Keep related code together (tests next to source) |
+
+### Directory Conventions
+
+```
+# ✅ Good: Related code together
+components/timeline/
+├── Timeline.tsx           # Main component
+├── Timeline.test.tsx      # Tests
+├── TimelineCard.tsx       # Sub-component
+├── TimelineConnector.tsx  # Sub-component
+├── useTimelineScroll.ts   # Component-specific hook
+├── timeline.types.ts      # Component-specific types
+└── index.ts               # Public exports
+
+# ❌ Bad: Scattered by type
+components/
+├── Timeline.tsx
+├── TimelineCard.tsx
+hooks/
+├── useTimelineScroll.ts
+types/
+├── timeline.ts
+tests/
+├── Timeline.test.tsx
+```
+
+### Abstraction Guidelines
+
+```typescript
+// ❌ Premature abstraction
+// Don't create a generic <Card> before you have 3 different card types
+
+// ✅ Extract when pattern is clear
+// After building TimelineCard, EIPCard, SourceCard, extract shared structure:
+
+interface CardProps {
+  header: React.ReactNode
+  content: React.ReactNode
+  footer?: React.ReactNode
+  onClick?: () => void
+  selected?: boolean
+}
+
+function Card({ header, content, footer, onClick, selected }: CardProps) {
+  return (
+    <div 
+      onClick={onClick}
+      className={cn(
+        "rounded-xl border p-4 transition-all",
+        onClick && "cursor-pointer hover:shadow-lg",
+        selected && "ring-2 ring-primary"
+      )}
+    >
+      <div className="mb-2">{header}</div>
+      <div>{content}</div>
+      {footer && <div className="mt-3 pt-3 border-t">{footer}</div>}
+    </div>
+  )
+}
+
+// Then use in specific components:
+function TimelineCard({ node }: { node: TimelineNode }) {
+  return (
+    <Card
+      header={<TimelineCardHeader date={node.date} type={node.type} />}
+      content={<TimelineCardContent node={node} />}
+      footer={node.relatedEips && <EIPBadges eips={node.relatedEips} />}
+    />
+  )
+}
+```
+
+### Shared Utilities
+
+```typescript
+// lib/utils/date.ts - DRY date formatting
+export function formatDate(date: Date): string {
+  return new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  }).format(date)
+}
+
+export function formatRelative(date: Date): string {
+  const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' })
+  const diff = Date.now() - date.getTime()
+  const days = Math.floor(diff / (1000 * 60 * 60 * 24))
+  
+  if (days < 30) return rtf.format(-days, 'day')
+  if (days < 365) return rtf.format(-Math.floor(days / 30), 'month')
+  return rtf.format(-Math.floor(days / 365), 'year')
+}
+
+export function isInEra(date: Date, era: Era): boolean {
+  const ranges = ERA_DATE_RANGES[era]
+  return date >= ranges.start && date < ranges.end
+}
+```
+
+```typescript
+// lib/utils/eip.ts - DRY EIP utilities
+export function formatEIPNumber(num: number): string {
+  return `EIP-${num}`
+}
+
+export function getEIPUrl(num: number): string {
+  return `https://eips.ethereum.org/EIPS/eip-${num}`
+}
+
+export function getEIPStatus(eip: EIP): { label: string; color: string } {
+  const statusMap = {
+    Draft: { label: 'Draft', color: 'bg-gray-500' },
+    Review: { label: 'Review', color: 'bg-yellow-500' },
+    'Last Call': { label: 'Last Call', color: 'bg-orange-500' },
+    Final: { label: 'Final', color: 'bg-green-500' },
+    Stagnant: { label: 'Stagnant', color: 'bg-red-500' },
+    Withdrawn: { label: 'Withdrawn', color: 'bg-gray-400' },
+  }
+  return statusMap[eip.status] ?? { label: eip.status, color: 'bg-gray-500' }
+}
+
+export function groupEIPsByCategory(eips: EIP[]): Record<string, EIP[]> {
+  return eips.reduce((acc, eip) => {
+    const cat = eip.category ?? 'Other'
+    acc[cat] = acc[cat] ?? []
+    acc[cat].push(eip)
+    return acc
+  }, {} as Record<string, EIP[]>)
+}
+```
+
+### Custom Hooks (Single Responsibility)
+
+```typescript
+// hooks/useTimelineData.ts - Data fetching only
+export function useTimelineData(filters?: TimelineFilters) {
+  return useQuery({
+    queryKey: ['timeline', filters],
+    queryFn: () => fetchTimeline(filters),
+    staleTime: 5 * 60 * 1000,
+  })
+}
+
+// hooks/useTimelineScroll.ts - Scroll behavior only
+export function useTimelineScroll(containerRef: RefObject<HTMLElement>) {
+  const [activeEra, setActiveEra] = useState<Era>('frontier')
+  const [scrollProgress, setScrollProgress] = useState(0)
+  
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container
+      setScrollProgress(scrollTop / (scrollHeight - clientHeight))
+      
+      // Detect active era based on scroll position
+      const eraElements = container.querySelectorAll('[data-era]')
+      for (const el of eraElements) {
+        const rect = el.getBoundingClientRect()
+        if (rect.top <= clientHeight / 2) {
+          setActiveEra(el.dataset.era as Era)
+        }
+      }
+    }
+    
+    container.addEventListener('scroll', handleScroll, { passive: true })
+    return () => container.removeEventListener('scroll', handleScroll)
+  }, [containerRef])
+  
+  return { activeEra, scrollProgress }
+}
+
+// hooks/useTimelineSelection.ts - Selection state only
+export function useTimelineSelection() {
+  const [selectedNode, setSelectedNode] = useState<TimelineNode | null>(null)
+  
+  const selectNode = useCallback((node: TimelineNode) => {
+    setSelectedNode(node)
+  }, [])
+  
+  const clearSelection = useCallback(() => {
+    setSelectedNode(null)
+  }, [])
+  
+  return { selectedNode, selectNode, clearSelection }
+}
+```
+
+### Service Layer (Single Responsibility)
+
+```typescript
+// services/embedding.ts - Embedding only
+export class EmbeddingService {
+  private client: OpenAI
+  
+  constructor(apiKey: string) {
+    this.client = new OpenAI({ apiKey })
+  }
+  
+  async embed(text: string): Promise<number[]> {
+    const response = await this.client.embeddings.create({
+      model: 'text-embedding-3-small',
+      input: text,
+    })
+    return response.data[0].embedding
+  }
+  
+  async embedBatch(texts: string[]): Promise<number[][]> {
+    const response = await this.client.embeddings.create({
+      model: 'text-embedding-3-small',
+      input: texts,
+    })
+    return response.data.map(d => d.embedding)
+  }
+}
+
+// services/retrieval.ts - Retrieval only
+export class RetrievalService {
+  constructor(
+    private vectorDb: VectorDB,
+    private embeddingService: EmbeddingService
+  ) {}
+  
+  async search(query: string, limit = 10): Promise<RetrievalResult[]> {
+    const embedding = await this.embeddingService.embed(query)
+    const results = await this.vectorDb.query(embedding, limit)
+    return results.map(r => ({
+      id: r.id,
+      content: r.metadata.content,
+      score: r.score,
+      source: r.metadata.source,
+    }))
+  }
+}
+
+// services/chat.ts - Chat orchestration only
+export class ChatService {
+  constructor(
+    private retrieval: RetrievalService,
+    private llm: LLMService
+  ) {}
+  
+  async *chat(message: string): AsyncGenerator<ChatChunk> {
+    // Retrieve context
+    const context = await this.retrieval.search(message, 8)
+    
+    // Build prompt
+    const prompt = this.buildPrompt(message, context)
+    
+    // Stream response
+    for await (const token of this.llm.stream(prompt)) {
+      yield { type: 'token', content: token }
+    }
+    
+    // Yield sources
+    yield { type: 'sources', sources: context.map(c => c.source) }
+  }
+  
+  private buildPrompt(message: string, context: RetrievalResult[]): Prompt {
+    // ... prompt construction
+  }
+}
+```
+
+### Component Composition
+
+```typescript
+// ✅ Composition over inheritance
+// Build complex UIs from simple, focused components
+
+// Base building blocks
+function Badge({ children, variant }: BadgeProps) { /* ... */ }
+function Tooltip({ content, children }: TooltipProps) { /* ... */ }
+
+// Composed component
+function EIPBadge({ eip }: { eip: number }) {
+  const { data } = useEIP(eip)
+  
+  return (
+    <Tooltip content={data?.title ?? 'Loading...'}>
+      <Badge variant={getEIPVariant(data?.status)}>
+        EIP-{eip}
+      </Badge>
+    </Tooltip>
+  )
+}
+
+// Further composed
+function EIPBadgeList({ eips }: { eips: number[] }) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      {eips.map(eip => <EIPBadge key={eip} eip={eip} />)}
+    </div>
+  )
+}
+
+// Used in timeline
+function TimelineCardFooter({ node }: { node: TimelineNode }) {
+  if (!node.relatedEips?.length) return null
+  
+  return (
+    <div className="pt-3 border-t">
+      <EIPBadgeList eips={node.relatedEips} />
+    </div>
+  )
+}
+```
+
+### Error Handling Patterns
+
+```typescript
+// lib/errors.ts - Typed errors
+export class AppError extends Error {
+  constructor(
+    message: string,
+    public code: string,
+    public statusCode = 500
+  ) {
+    super(message)
+    this.name = 'AppError'
+  }
+}
+
+export class NotFoundError extends AppError {
+  constructor(resource: string, id: string) {
+    super(`${resource} not found: ${id}`, 'NOT_FOUND', 404)
+  }
+}
+
+export class ValidationError extends AppError {
+  constructor(message: string) {
+    super(message, 'VALIDATION_ERROR', 400)
+  }
+}
+
+// Usage in services
+async function getEIP(number: number): Promise<EIP> {
+  const eip = await db.query.eips.findFirst({
+    where: eq(eips.number, number)
+  })
+  
+  if (!eip) {
+    throw new NotFoundError('EIP', String(number))
+  }
+  
+  return eip
+}
+
+// Centralized error handling in API
+app.onError((err, c) => {
+  if (err instanceof AppError) {
+    return c.json({ error: err.message, code: err.code }, err.statusCode)
+  }
+  
+  console.error(err)
+  return c.json({ error: 'Internal server error', code: 'INTERNAL' }, 500)
+})
+```
+
+---
+
 ## Next Steps
 
 1. **Validate spec** with Everdred
